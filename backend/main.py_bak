@@ -1,0 +1,57 @@
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response
+from pydantic import BaseModel
+import uuid
+import httpx
+
+app = FastAPI()
+
+class PreviewRequest(BaseModel):
+    domain: str
+    ip: str
+
+preview_links = {}
+
+@app.post("/api/preview-link")
+async def generate_preview_link(req: PreviewRequest):
+    if not req.domain or not req.ip:
+        raise HTTPException(status_code=400, detail="Domain and IP required")
+    preview_id = str(uuid.uuid4())[:8]
+    preview_links[preview_id] = {"domain": req.domain, "ip": req.ip}
+    return {"previewUrl": f"/preview/{preview_id}"}
+
+@app.get("/preview/{preview_id}")
+async def get_preview(preview_id: str, request: Request):
+    data = preview_links.get(preview_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Not Found")
+    domain = data["domain"]
+    ip = data["ip"]
+
+    # Try both HTTP and HTTPS for maximum compatibility
+    for scheme in ["http", "https"]:
+        url = f"{scheme}://{ip}/"
+        headers = {"Host": domain}
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                resp = await client.get(url, headers=headers)
+            # Only return result if status 200
+            if resp.status_code == 200:
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type", "text/html")
+                )
+            elif 300 <= resp.status_code < 400:
+                # Display final redirect info if not handled
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type", "text/html")
+                )
+        except Exception as e:
+            # Try next scheme if available, else error
+            continue
+    raise HTTPException(status_code=502, detail=f"Could not proxy to {domain} at {ip} over HTTP or HTTPS.")
+
+
