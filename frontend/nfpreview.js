@@ -21,17 +21,20 @@ function showMessage(text, type) {
 }
 
 function showPreview(previewUrl) {
-  // Get full URL for sharing
   const fullUrl = window.location.origin + previewUrl;
-  previewContainer.innerHTML = `<iframe class="preview-frame" src="${previewUrl}" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"></iframe>`;
-  previewUrlDiv.innerHTML = `<a href="${fullUrl}" target="_blank" class="preview-link">${fullUrl}</a> <button onclick="copyPreviewLink('${fullUrl}')" class="copy-btn" title="Copy link">📋</button>`;
+  previewContainer.innerHTML = `<iframe class="preview-frame" src="${previewUrl}" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals" style="width: 100%; height: 400px; border: none; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);"></iframe>`;
+  previewUrlDiv.innerHTML = `
+    <div class="preview-actions">
+      <button onclick="navigator.clipboard.writeText('${fullUrl}')" class="copy-btn" title="Copy URL">Copy</button>
+      <button onclick="window.open('${fullUrl}', '_blank')" class="open-btn" title="Open in new tab">Open</button>
+    </div>
+  `;
 }
 
 function copyPreviewLink(url) {
   navigator.clipboard.writeText(url).then(() => {
     showMessage('Preview link copied to clipboard!', 'success');
   }).catch(() => {
-    // Fallback for older browsers
     const textarea = document.createElement('textarea');
     textarea.value = url;
     document.body.appendChild(textarea);
@@ -43,7 +46,7 @@ function copyPreviewLink(url) {
 }
 
 function showPlaceholder(text) {
-  previewContainer.innerHTML = `<div class="preview-placeholder">${text}</div>`;
+  previewContainer.innerHTML = `<div class="preview-placeholder" style="color: #aaa; font-size: 1rem;">${text}</div>`;
   previewUrlDiv.innerHTML = '';
 }
 
@@ -82,88 +85,30 @@ async function fetchPreviewLink(domain, ip) {
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  
+
   const domain = form.domain.value.trim();
   const ip = form.ip.value.trim();
-  
-  // Clear previous messages
-  messageDiv.innerHTML = '';
-  
-  // Validate inputs
+
   if (!validateDomain(domain)) {
-    showMessage('Please enter a valid domain name (e.g., example.com)', 'error');
+    showMessage('Invalid domain format', 'error');
     return;
   }
-  
+
   if (!validateIP(ip)) {
-    showMessage('Please enter a valid IP address (e.g., 192.168.1.1)', 'error');
+    showMessage('Invalid IP address format', 'error');
     return;
   }
-  
-  // Disable form and show loading
-  submitBtn.disabled = true;
-  setStatus('loading', 'Connecting...');
-  showPlaceholder('Connecting to server...');
-  
+
+  previewContainer.innerHTML = '<div style="color: #aaa; font-size: 1rem;">Loading...</div>';
+
   try {
-    // Create preview link
-    const response = await fetch('/api/preview-link', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({domain, ip})
-    });
-    
-    if (!response.ok) {
-      throw new Error('Failed to create preview link');
+    const previewUrl = await fetchPreviewLink(domain, ip);
+    if (!previewUrl) {
+      throw new Error('Preview URL not generated');
     }
-    
-    const data = await response.json();
-    currentPreviewId = data.previewUrl;
-    
-    // Get full URL for display
-    const fullUrl = window.location.origin + data.previewUrl;
-    
-    // Show success message with shareable link
-    showMessage(`Preview created! Share this link: <a href="${fullUrl}" target="_blank" style="color: #4ade80; text-decoration: underline;">${fullUrl}</a>`, 'success');
-    
-    // Show the preview iframe directly
-    setStatus('loading', 'Loading website...');
-    showPreview(data.previewUrl);
-    
-    // Monitor iframe load status
-    const iframe = previewContainer.querySelector('.preview-frame');
-    let loadTimeout;
-    let hasLoaded = false;
-    
-    iframe.onload = () => {
-      hasLoaded = true;
-      clearTimeout(loadTimeout);
-      setStatus('success', 'Website loaded');
-    };
-    
-    iframe.onerror = () => {
-      clearTimeout(loadTimeout);
-      if (!hasLoaded) {
-        setStatus('error', 'Failed to load');
-        showMessage('The website could not be loaded. Please check if the IP address is correct and the server is accessible.', 'error');
-      }
-    };
-    
-    // Timeout after 15 seconds
-    loadTimeout = setTimeout(() => {
-      if (!hasLoaded) {
-        setStatus('error', 'Connection timeout');
-        showMessage('Connection timeout. Please verify the IP address is correct and the server is accessible.', 'error');
-      }
-    }, 15000);
-    
+    showPreview(previewUrl);
   } catch (error) {
-    console.error('Error:', error);
-    setStatus('error', 'Error');
-    showPlaceholder('Failed to create preview. Please try again.');
-    showMessage('An error occurred while creating the preview link. Please try again.', 'error');
-  } finally {
-    submitBtn.disabled = false;
+    previewContainer.innerHTML = `<div style="color: #f00; font-size: 1rem;">Error: ${error.message}</div>`;
   }
 });
 
