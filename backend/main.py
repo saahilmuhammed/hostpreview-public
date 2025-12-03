@@ -21,78 +21,158 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("preview_proxy")
+
 
 class PreviewRequest(BaseModel):
     domain: str
     ip: str
+    protocol: Optional[str] = None
+    path: Optional[str] = None
 
-    @validator('domain')
+    @validator("domain")
     def validate_domain(cls, v):
-        domain_pattern = r'^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
+        domain_pattern = r"^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$"
         if not re.match(domain_pattern, v, re.IGNORECASE):
-            raise ValueError('Invalid domain format')
+            raise ValueError("Invalid domain format")
         return v.lower()
 
-    @validator('ip')
+    @validator("ip")
     def validate_ip(cls, v):
-        ip_pattern = r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+        ip_pattern = r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
         if not re.match(ip_pattern, v):
-            raise ValueError('Invalid IP address format')
+            raise ValueError("Invalid IP address format")
         return v
 
+    @validator("protocol")
+    def validate_protocol(cls, v):
+        if not v:
+            return None
+        v = v.lower()
+        if v not in ("http", "https"):
+            raise ValueError("Protocol must be http or https")
+        return v
+
+    @validator("path")
+    def normalize_path(cls, v):
+        if not v:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not v.startswith("/"):
+            v = "/" + v
+        return v
+
+
 preview_links = {}
+
 
 @app.post("/api/preview-link")
 async def generate_preview_link(req: PreviewRequest):
     if not req.domain or not req.ip:
         raise HTTPException(status_code=400, detail="Domain and IP required")
     preview_id = str(uuid.uuid4())[:8]
-    preview_links[preview_id] = {"domain": req.domain, "ip": req.ip}
+    preview_links[preview_id] = {
+        "domain": req.domain,
+        "ip": req.ip,
+        "protocol": req.protocol,
+        "path": req.path,
+    }
     return {"previewUrl": f"/preview/{preview_id}/"}
+
 
 @app.get("/api/preview/{preview_id}/status")
 async def check_preview_status(preview_id: str):
     data = preview_links.get(preview_id)
     if not data:
         raise HTTPException(status_code=404, detail="Preview link not found")
-    return {"exists": True, "domain": data["domain"], "ip": data["ip"]}
+    return {
+        "exists": True,
+        "domain": data["domain"],
+        "ip": data["ip"],
+        "protocol": data.get("protocol"),
+        "path": data.get("path"),
+    }
+
 
 def rewrite_css_urls(css: str, prefix: str) -> str:
     # Rewrite all url(/...) not already /preview/
-    return re.sub(r'url\(\s*[\'"]?/(?!preview/)', f'url({prefix}', css)
+    return re.sub(r"url\(\s*['\"]?/(?!preview/)", f"url({prefix}", css)
 
-@app.api_route("/preview/{preview_id}/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+
+@app.api_route(
+    "/preview/{preview_id}/{full_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
 async def preview_proxy(preview_id: str, full_path: str = "", request: Request = None):
     data = preview_links.get(preview_id)
     if not data:
         raise HTTPException(status_code=404, detail="Preview link not found")
+
     domain = data["domain"]
     ip = data["ip"]
+    preferred_protocol = data.get("protocol")
+    base_path = data.get("path") or ""
+
+    # Build path to target
     query_string = str(request.query_params) if request.query_params else ""
+
+    if base_path and full_path:
+        if base_path.endswith("/"):
+            joined_path = base_path + full_path
+        else:
+            joined_path = base_path + "/" + full_path
+    elif base_path:
+        joined_path = base_path
+    else:
+        joined_path = "/" + full_path if full_path else ""
+
     if query_string:
-        full_path = f"{full_path}?{query_string}" if full_path else f"?{query_string}"
-    for scheme in ["https", "http"]:
-        target_url = f"{scheme}://{ip}/{full_path}"
+        if "?" in joined_path:
+            joined_path = f"{joined_path}&{query_string}"
+        else:
+            joined_path = f"{joined_path}?{query_string}"
+
+    protocol_order = (
+        [preferred_protocol] if preferred_protocol in ("http", "https") else ["https", "http"]
+    )
+
+    for scheme in protocol_order:
+        if scheme is None:
+            continue
+
+        target_url = f"{scheme}://{ip}{joined_path}"
         headers = {}
         for key, value in request.headers.items():
             if key.lower() not in [
-                "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-                "te", "trailers", "upgrade", "transfer-encoding", "host", "accept-encoding"
+                "connection",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailers",
+                "upgrade",
+                "transfer-encoding",
+                "host",
+                "accept-encoding",
             ]:
                 headers[key] = value
         headers["host"] = domain
         headers["accept-encoding"] = "identity"
+
         try:
             body = None
             if request.method in ("POST", "PUT", "PATCH"):
                 body = await request.body()
+
             ssl_ctx = None
             if scheme == "https":
                 ssl_ctx = ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
+
             timeout = httpx.Timeout(15.0, connect=10.0)
             async with httpx.AsyncClient(
                 verify=ssl_ctx,
@@ -105,8 +185,10 @@ async def preview_proxy(preview_id: str, full_path: str = "", request: Request =
                     headers=headers,
                     content=body,
                 )
+
                 raw_content = await resp.aread()
                 content_encoding = resp.headers.get("content-encoding", "").lower().strip()
+
                 if content_encoding and content_encoding != "identity":
                     try:
                         if "gzip" in content_encoding or "x-gzip" in content_encoding:
@@ -128,95 +210,114 @@ async def preview_proxy(preview_id: str, full_path: str = "", request: Request =
                         content = raw_content
                 else:
                     content = raw_content
+
                 status_code = resp.status_code
                 response_headers_dict = dict(resp.headers)
+
             excluded_headers = [
-                "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
-                "trailers", "upgrade", "transfer-encoding", "content-encoding", "content-length",
-                "x-frame-options", "frame-ancestors",
-                "content-security-policy", "content-security-policy-report-only"
+                "connection",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailers",
+                "upgrade",
+                "transfer-encoding",
+                "content-encoding",
+                "content-length",
+                "x-frame-options",
+                "frame-ancestors",
+                "content-security-policy",
+                "content-security-policy-report-only",
             ]
-            response_headers = {}
+            response_headers: dict[str, str] = {}
             for key, value in response_headers_dict.items():
-                key_lower = key.lower()
-                if key_lower not in excluded_headers:
+                if key.lower() not in excluded_headers:
                     response_headers[key] = value
+
             if "content-encoding" in response_headers:
                 del response_headers["content-encoding"]
+
             content_type = response_headers_dict.get("content-type")
             preview_prefix = f"/preview/{preview_id}/"
             charset = resp.encoding if getattr(resp, "encoding", None) else "utf-8"
+
             if content_type:
                 lower_type = content_type.lower()
                 if "text/html" in lower_type:
                     try:
                         html_text = content.decode(charset, errors="ignore")
                         soup = BeautifulSoup(html_text, "html.parser")
+
                         base_tag = soup.find("base")
                         if base_tag:
                             base_tag.extract()
+
                         for tag in soup.find_all(True):
                             for attr in ["src", "href", "action", "poster", "data", "content"]:
                                 if attr in tag.attrs:
                                     url = tag.attrs[attr]
-                                    if isinstance(url, str):
-                                        try:
-                                            # Protocol-relative URLs (e.g., //example.com)
-                                            if url.startswith("//"):
-                                                tag.attrs[attr] = "https:" + url
-                                                continue
-                                            # Absolute paths (e.g., /images/logo.png)
-                                            if url.startswith("/") and not url.startswith("/preview/"):
-                                                tag.attrs[attr] = preview_prefix + url.lstrip("/")
-                                                continue
-                                            # Avoid rewriting non-URL attributes like width
-                                            if attr not in ["src", "href", "action", "poster", "data", "content"]:
-                                                continue
-                                            # Relative paths (e.g., images/logo.png)
-                                            if not url.startswith("http") and not url.startswith("/"):
-                                                tag.attrs[attr] = preview_prefix + url
-                                                continue
-                                            # Ensure query parameters are preserved
-                                            if "?" in url:
-                                                base_url, query = url.split("?", 1)
-                                                if base_url.startswith("/"):
-                                                    tag.attrs[attr] = preview_prefix + base_url.lstrip("/") + "?" + query
-                                        except Exception as e:
-                                            logger.warning(f"Failed to rewrite URL {url}: {str(e)}")
+                                    if not isinstance(url, str):
+                                        continue
+                                    try:
+                                        if url.startswith("//"):
+                                            tag.attrs[attr] = "https:" + url
+                                            continue
+                                        if url.startswith("/") and not url.startswith("/preview/"):
+                                            tag.attrs[attr] = preview_prefix + url.lstrip("/")
+                                            continue
+                                        if not url.startswith("http") and not url.startswith("/"):
+                                            tag.attrs[attr] = preview_prefix + url
+                                            continue
+                                        if "?" in url and url.startswith("/"):
+                                            base_url, query = url.split("?", 1)
+                                            tag.attrs[attr] = (
+                                                preview_prefix + base_url.lstrip("/") + "?" + query
+                                            )
+                                    except Exception as e:
+                                        logger.warning(f"Failed to rewrite URL {url}: {e}")
+
                         for style_tag in soup.find_all("style"):
                             if style_tag.string:
                                 try:
                                     style_tag.string = rewrite_css_urls(style_tag.string, preview_prefix)
                                 except Exception as e:
-                                    logger.warning(f"Failed to rewrite CSS in <style>: {str(e)}")
+                                    logger.warning(f"Failed to rewrite CSS in <style>: {e}")
+
                         for tag in soup.find_all(style=True):
                             try:
-                                tag['style'] = rewrite_css_urls(tag['style'], preview_prefix)
+                                tag["style"] = rewrite_css_urls(tag["style"], preview_prefix)
                             except Exception as e:
-                                logger.warning(f"Failed to rewrite inline style: {str(e)}")
+                                logger.warning(f"Failed to rewrite inline style: {e}")
+
                         content = soup.encode(charset)
                     except Exception as ex:
-                        logger.error(f"Error processing HTML content: {str(ex)}")
+                        logger.error(f"Error processing HTML content: {ex}")
                 elif "text/css" in lower_type:
                     try:
                         css_text = content.decode(charset, errors="ignore")
                         content = rewrite_css_urls(css_text, preview_prefix).encode(charset)
                     except Exception as e:
-                        logger.error(f"Error processing CSS content: {str(e)}")
+                        logger.error(f"Error processing CSS content: {e}")
+
+            if content is None:
+                content = raw_content
+
             response_headers["content-length"] = str(len(content))
             return Response(
                 content=content,
                 status_code=status_code,
                 headers=response_headers,
-                media_type=content_type
+                media_type=content_type,
             )
+
         except httpx.TimeoutException:
             logger.error(f"Timeout while connecting to {target_url}")
             if scheme == "https":
                 continue
             raise HTTPException(
                 status_code=504,
-                detail=f"Connection timeout. The server at {ip} is not responding. Please verify the IP address is correct."
+                detail=f"Connection timeout. The server at {ip} is not responding. Please verify the IP address is correct.",
             )
         except httpx.ConnectError:
             logger.error(f"Connection error while connecting to {target_url}")
@@ -224,28 +325,29 @@ async def preview_proxy(preview_id: str, full_path: str = "", request: Request =
                 continue
             raise HTTPException(
                 status_code=502,
-                detail=f"Cannot connect to {ip}. Please verify the IP address is correct and the server is accessible."
+                detail=f"Cannot connect to {ip}. Please verify the IP address is correct and the server is accessible.",
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP status error {e.response.status_code} while connecting to {target_url}")
             raise HTTPException(
                 status_code=e.response.status_code,
-                detail=f"Server returned error: {e.response.status_code}"
+                detail=f"Server returned error: {e.response.status_code}",
             )
         except Exception as e:
-            logger.exception(f"Unexpected error while connecting to {target_url}: {str(e)}")
+            logger.exception(f"Unexpected error while connecting to {target_url}: {e}")
             if scheme == "https":
                 continue
             raise HTTPException(
                 status_code=502,
-                detail=f"Error connecting to {ip}: {str(e)}"
+                detail=f"Error connecting to {ip}: {str(e)}",
             )
+
     raise HTTPException(
         status_code=502,
-        detail=f"Could not connect to {domain} at {ip}. Please verify the IP address is correct and the server is accessible."
+        detail=f"Could not connect to {domain} at {ip}. Please verify the IP address is correct and the server is accessible.",
     )
+
 
 @app.get("/")
 async def root():
     return {"message": "HostPreview API"}
-
