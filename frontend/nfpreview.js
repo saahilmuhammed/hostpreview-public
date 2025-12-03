@@ -1,19 +1,26 @@
+// frontend/nfpreview.js
+
 const form = document.getElementById('previewForm');
-const submitBtn = document.getElementById('submitBtn');
+const submitBtn = document.getElementById('submitBtn'); // may be null, harmless
 const messageDiv = document.getElementById('message');
 const previewContainer = document.getElementById('previewContainer');
 const statusIndicator = document.getElementById('statusIndicator');
 const statusText = document.getElementById('statusText');
-const previewUrlDiv = document.getElementById('previewUrl');
+
+// NEW: replace old previewUrlDiv
+const previewToolbar = document.getElementById('previewToolbar');   // wrapper with buttons
+const previewUrlText = document.getElementById('previewUrlText');   // shows full URL
 
 let currentPreviewId = null;
 
 function setStatus(status, text) {
+  if (!statusIndicator || !statusText) return;
   statusIndicator.className = `status-indicator ${status}`;
   statusText.textContent = text;
 }
 
 function showMessage(text, type) {
+  if (!messageDiv) return;
   messageDiv.innerHTML = `<div class="${type}-message">${text}</div>`;
   setTimeout(() => {
     messageDiv.innerHTML = '';
@@ -22,13 +29,19 @@ function showMessage(text, type) {
 
 function showPreview(previewUrl) {
   const fullUrl = window.location.origin + previewUrl;
-  previewContainer.innerHTML = `<iframe class="preview-frame" src="${previewUrl}" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals" style="width: 100%; height: 400px; border: none; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);"></iframe>`;
-  previewUrlDiv.innerHTML = `
-    <div class="preview-actions">
-      <button onclick="navigator.clipboard.writeText('${fullUrl}')" class="copy-btn" title="Copy URL">Copy</button>
-      <button onclick="window.open('${fullUrl}', '_blank')" class="open-btn" title="Open in new tab">Open</button>
-    </div>
-  `;
+
+  previewContainer.innerHTML =
+    `<iframe class="preview-frame" src="${previewUrl}" ` +
+    `sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals" ` +
+    `style="width: 100%; height: 400px; border: none; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);"></iframe>`;
+
+  // UPDATED: use toolbar instead of previewUrlDiv
+  if (previewUrlText) {
+    previewUrlText.textContent = fullUrl;
+  }
+  if (previewToolbar) {
+    previewToolbar.style.display = 'flex';
+  }
 }
 
 function copyPreviewLink(url) {
@@ -46,8 +59,16 @@ function copyPreviewLink(url) {
 }
 
 function showPlaceholder(text) {
-  previewContainer.innerHTML = `<div class="preview-placeholder" style="color: #aaa; font-size: 1rem;">${text}</div>`;
-  previewUrlDiv.innerHTML = '';
+  previewContainer.innerHTML =
+    `<div class="preview-placeholder" style="color: #aaa; font-size: 1rem;">${text}</div>`;
+
+  // UPDATED: clear/hide toolbar instead of touching previewUrlDiv
+  if (previewUrlText) {
+    previewUrlText.textContent = '';
+  }
+  if (previewToolbar) {
+    previewToolbar.style.display = 'none';
+  }
 }
 
 function validateIP(ip) {
@@ -60,14 +81,19 @@ function validateDomain(domain) {
   return domainRegex.test(domain);
 }
 
-async function fetchPreviewLink(domain, ip) {
+async function fetchPreviewLink(domain, ip, protocol, path) {
   try {
     const response = await fetch('/api/preview-link', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ domain, ip }),
+      body: JSON.stringify({
+        domain,
+        ip,
+        protocol: protocol || null,
+        path: path || null,
+      }),
     });
 
     if (!response.ok) {
@@ -88,6 +114,8 @@ form.addEventListener('submit', async (e) => {
 
   const domain = form.domain.value.trim();
   const ip = form.ip.value.trim();
+  const protocol = form.protocol ? form.protocol.value.trim() : '';
+  const path = form.path ? form.path.value.trim() : '';
 
   if (!validateDomain(domain)) {
     showMessage('Invalid domain format', 'error');
@@ -99,22 +127,37 @@ form.addEventListener('submit', async (e) => {
     return;
   }
 
-  previewContainer.innerHTML = '<div style="color: #aaa; font-size: 1rem;">Loading...</div>';
+  if (submitBtn) submitBtn.disabled = true;
+  setStatus('loading', 'Connecting...');
+  previewContainer.innerHTML =
+    '<div style="color: #aaa; font-size: 1rem;">Loading...</div>';
+
+  if (previewToolbar) {
+    previewToolbar.style.display = 'none';
+  }
 
   try {
-    const previewUrl = await fetchPreviewLink(domain, ip);
+    const previewUrl = await fetchPreviewLink(domain, ip, protocol, path);
     if (!previewUrl) {
       throw new Error('Preview URL not generated');
     }
+    currentPreviewId = previewUrl;
+    setStatus('loading', 'Loading website...');
     showPreview(previewUrl);
   } catch (error) {
-    previewContainer.innerHTML = `<div style="color: #f00; font-size: 1rem;">Error: ${error.message}</div>`;
+    previewContainer.innerHTML =
+      `<div style="color: #f00; font-size: 1rem;">Error: ${error.message}</div>`;
+    setStatus('error', 'Error');
+    if (previewToolbar) {
+      previewToolbar.style.display = 'none';
+    }
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 });
 
 // Initialize
 setStatus('', 'Ready');
-showPlaceholder('Enter a domain and IP address to preview the website');
+showPlaceholder('Enter a domain, IP, protocol and path to preview the website');
 
-// Make copyPreviewLink globally accessible
 window.copyPreviewLink = copyPreviewLink;
