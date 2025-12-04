@@ -9,7 +9,7 @@ HostPreview (vibe‑coded) is a modern web proxy tool for previewing websites ag
 1. Clone the repo:
    ```
    git clone https://github.com/saahilmuhammed/hostpreview.git
-   cd hostpreview
+   cd hostpreview-public
    ```
 2. Build and start the stack:
    ```
