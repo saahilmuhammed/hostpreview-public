@@ -17,7 +17,7 @@ docker compose up -d
 ```
 3.  Open HostPreview in your browser:
 ```
-http://localhost
+http://127.0.0.1
 ```
 4. Use the app:
 - Enter:
