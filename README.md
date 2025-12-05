@@ -17,7 +17,7 @@ HostPreview (vibe‑coded) is a modern web proxy tool for previewing websites ag
    ```
 3. Open in your browser:
    ```
-   http://127.0.0.1
+   http://localhost
    ```
 4. Use the app:
    - Enter **Domain**, **IP address**, optional **protocol** and **path**.
